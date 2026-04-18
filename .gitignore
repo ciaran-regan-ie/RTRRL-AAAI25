@@ -167,3 +167,12 @@ cython_debug/
 # Logs
 .aim/
 .wandb/
+logs/
+wandb/
+
+# Images and data
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.json
