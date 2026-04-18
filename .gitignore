@@ -164,6 +164,9 @@ cython_debug/
 # Visual Studio Code
 .vscode/
 
+# NFS temp files
+.nfs*
+
 # Logs
 .aim/
 .wandb/

@@ -55,16 +55,8 @@ class DummyLogger(dict, object):
         """Return name of logger."""
         return "DummyLogger"
 
-    def log(self, metrics: dict, step: int = None):
-        """Log a dictionary of metrics (per step).
-
-        Parameters
-        ----------
-        metrics : dict
-            Dictonaries of scalar metrics.
-        step : int, optional
-            Step number, by default framework will use global step.
-        """
+    def log(self, *args, **kwargs):
+        """Log metrics. Accepts both dict-style log(metrics, step) and streamrl-style log(name, value, step)."""
         pass
 
     def log_params(self, params_dict):
@@ -272,7 +264,17 @@ def with_logger(
     hparams_type=None,
 ):
     """Wrap training function with logger."""
-    if logger_name == "wandb":
+    if logger_name == "streamrl" or logger_name == "streamrl_wandb":
+        from logger import Logger
+        config = asdict(hparams) if not isinstance(hparams, dict) else hparams
+        logger = Logger(
+            use_wandb=(logger_name == "streamrl_wandb"),
+            wandb_project=project_name,
+            wandb_config=config,
+            run_name=run_name,
+        )
+        return func(hparams, logger=logger)
+    elif logger_name == "wandb":
 
         def pick_fun_and_run(_hparams, logger):
             return func(_hparams, logger=logger)

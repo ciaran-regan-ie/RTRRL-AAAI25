@@ -488,10 +488,10 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
             env_states.done.shape[0],
         )
         # Compute cumsum and get value corresponding to end of episode per batch.
-        ep_rewards = env_states.reward.cumsum(axis=0)[
+        per_ep_rewards = env_states.reward.cumsum(axis=0)[
             ep_until, jnp.arange(ep_until.shape[-1])
-        ].mean()
-        return ep_rewards, env_states
+        ]
+        return per_ep_rewards.mean(), per_ep_rewards, env_states
 
     # Set up scan body
     @jax.jit
@@ -511,6 +511,7 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
             _obs_rms,
             _reward_rms,
             seed,
+            episode_return,
         ) = _carry
         seed, action_key, dropout_key = jrandom.split(seed, 3)
 
@@ -526,6 +527,11 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
         if args.normalize_reward:
             _reward_rms = running_statistics.update(_reward_rms, env_state.reward)
         reward = env_state.reward.reshape(-1)
+
+        # Episode return tracking
+        new_episode_return = episode_return + reward
+        returned_episode_return = jnp.where(env_state.done, new_episode_return, jnp.zeros_like(new_episode_return))
+        episode_return = jnp.where(env_state.done, jnp.zeros_like(new_episode_return), new_episode_return)
 
         # Reset cell state and trace if done
         rnn_state = jax.tree.map(
@@ -782,8 +788,9 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
             _obs_rms,
             _reward_rms,
             seed,
+            episode_return,
         )
-        return _carry, (env_state.reward, env_state.done, loss_info, v_hat, d)
+        return _carry, (env_state.reward, env_state.done, loss_info, v_hat, d, returned_episode_return)
 
     carry = (
         params,
@@ -799,6 +806,7 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
         obs_rms,
         reward_rms,
         key_step,
+        jnp.zeros(batch_shape),
     )
 
     # Loop misc
@@ -837,9 +845,10 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
                 obs_rms,
                 reward_rms,
                 seed,
+                _episode_return,
             ) = carry
 
-            reward, dones, loss_info, values, delta = scan_out
+            reward, dones, loss_info, values, delta, returned_ep_returns = scan_out
             num_episodes = jnp.sum(dones)
             divisor = max(num_episodes, 1)
             avg_r = jnp.sum(reward) / divisor
@@ -849,32 +858,42 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
             # Calculate total steps from batch size and number of steps
             log_steps = (i + 1) * args.steps
             total_steps = log_steps * (args.env_params.batch_size or 1)
+
+            # Log individual episode returns
+            done_indices = np.argwhere(np.array(dones) > 0)
+            for idx in done_indices:
+                t_idx = int(idx[0])
+                b_idx = tuple(idx[1:])
+                ep_step = (i * args.steps + t_idx + 1) * (args.env_params.batch_size or 1)
+                ep_ret = float(returned_ep_returns[t_idx][b_idx]) if b_idx else float(returned_ep_returns[t_idx])
+                logger.log('return', ep_ret, step=ep_step)
+
             if i % args.log_every == 0:
                 # Logging -------------------------------------------------------------
-                metrics = {
-                    "steps": total_steps,
-                    "mean_reward": avg_r,
-                    "num_episodes": num_episodes,
-                    "mean_delta": avg_d,
-                    "mean_r_bar": avg_r_bar,
-                    "mean_v": avg_val,
-                    **jax.tree.map(jnp.mean, loss_info),
-                }
+                logger.log('stats/mean_reward', float(avg_r), total_steps)
+                logger.log('stats/num_episodes', float(num_episodes), total_steps)
+                logger.log('stats/mean_delta', float(avg_d), total_steps)
+                logger.log('stats/mean_r_bar', float(avg_r_bar), total_steps)
+                logger.log('stats/value', float(avg_val), total_steps)
+
+                # Losses
+                mean_loss_info = jax.tree.map(jnp.mean, loss_info)
+                for k, v in mean_loss_info.items():
+                    logger.log(f'losses/{k}', float(v), total_steps)
+
+                # Learning rates
                 current_lrs = get_current_lrs(opt_state)
                 if args.optimizer_params_td.decay_type:
-                    metrics["lr/td"] = current_lrs["lr_td"]
+                    logger.log('lr/td', float(current_lrs["lr_td"]), total_steps)
                 if args.optimizer_params_rnn.decay_type:
-                    metrics["lr/rnn"] = current_lrs["lr_rnn"]
-
-            else:
-                metrics = {}
+                    logger.log('lr/rnn', float(current_lrs["lr_rnn"]), total_steps)
 
             if args.log_norms and i % args.log_every == 0:
                 norms = log_norms(
                     {"z": z, "params": params, "slow_params": slow_params}
                 )
-                metrics = {**metrics, **{"norms/" + k: v for k, v in norms.items()}}
-                # metrics = {k: float(v) for k, v in metrics.items()}
+                for k, v in norms.items():
+                    logger.log(f'norms/{k}', float(v), total_steps)
 
             # Print current stats
             pbar.set_description(
@@ -887,10 +906,12 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
             ):  # also eval last
                 key_eval, _key = jrandom.split(key_eval)
                 # Do not render the first episode, render the last one
-                eval_avg, env_states = eval_model(
+                eval_avg, eval_per_ep, env_states = eval_model(
                     slow_params, key=_key, _obs_rms=obs_rms, _reward_rms=reward_rms
                 )
-                metrics["eval/rewards"] = float(eval_avg)
+                logger.log('eval/mean_return', float(eval_avg), total_steps)
+                for ep_ret in np.array(eval_per_ep):
+                    logger.log('eval/return', float(ep_ret), total_steps)
                 pbar.write(f"Eval reward: {eval_avg:.2f}")
 
                 # Maybe render and log video
@@ -916,13 +937,10 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
                     # New best
                     steps_since_best = 0
                     logger["best_eval_reward"] = eval_avg
-                    metrics["eval/best_eval_reward"] = eval_avg
+                    logger.log('eval/best_eval_reward', float(eval_avg), total_steps)
                 else:
                     # For early stopping
                     steps_since_best += 1
-
-            # Log metrics
-            logger.log(metrics, step=log_steps)
 
             # Early stopping
             if args.patience and steps_since_best >= args.patience:
@@ -932,10 +950,8 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
         print("Exception in training loop!")
         raise e
     finally:
-        logger["avg_reward"] = jnp.mean(jnp.array(all_rewards)) if all_rewards else 0
-        logger.finalize(all_param_norms)
+        logger.close()
 
-    logger.finalize()
     return logger["best_eval_reward"]
 
 
