@@ -3,6 +3,8 @@
 ## Launch all jobs
 
 ```bash
+# Reset manifest, then launch both
+echo "env,seed,array_job_id,task_id,output_dir,stdout_log" > logs/slurm/manifest.csv
 bash scripts/popjym_easy/launch_all.sh       # CTRNN
 bash scripts/popjym_easy_lru/launch_all.sh   # LRU
 ```
@@ -36,4 +38,18 @@ LRU scripts additionally pass `--rnn_model lru`.
 
 ```bash
 squeue -u $USER -o "%.10i %.30j %.8T %.10M %.6D %R" | column -t
+```
+
+## Check manifest
+
+```bash
+cat logs/slurm/manifest.csv | column -t -s,
+```
+
+## Cancel and relaunch all jobs
+
+```bash
+scancel -u $USER
+echo "env,seed,array_job_id,task_id,output_dir,stdout_log" > logs/slurm/manifest.csv
+bash scripts/popjym_easy/launch_all.sh && bash scripts/popjym_easy_lru/launch_all.sh
 ```

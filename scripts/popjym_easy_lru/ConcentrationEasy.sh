@@ -45,4 +45,5 @@ poetry run python rtrrl.py \
   --normalize_obs False \
   --update_period 1 \
   --episodes 15000 \
-  --steps 1000
+  --steps 1000 \
+  --logging streamrl
