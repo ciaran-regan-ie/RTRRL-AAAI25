@@ -1,5 +1,6 @@
 """Online Actor-Critic algorithm with eligibility traces for continuous actions."""
 
+import os
 from dataclasses import asdict, dataclass, field
 from functools import partial
 from pprint import pprint
@@ -65,6 +66,7 @@ class RTRRLParams:
     # Logging
     logging: str | None = None
     log_repo: str | None = None
+    output_dir: str | None = None
     save_model: bool = False
     log_norms: bool = False
     log_code: bool = False
@@ -958,6 +960,11 @@ def train_rtrrl(args: RTRRLParams, logger=DummyLogger()):
 if __name__ == "__main__":
     # Parse hparams from cmd line
     hparams: RTRRLParams = simple_parsing.parse(RTRRLParams, add_config_path_arg=True)
+
+    # Change to output_dir so logger writes metrics/plots there (like streamrl's Hydra chdir)
+    if hparams.output_dir:
+        os.makedirs(hparams.output_dir, exist_ok=True)
+        os.chdir(hparams.output_dir)
 
     # Name run
     run_name = hparams.env_params.env_name
